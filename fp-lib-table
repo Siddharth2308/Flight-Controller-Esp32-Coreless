@@ -1,0 +1,5 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "IRFZ44N")(type "KiCad")(uri "${KIPRJMOD}/IRFZ44N.pretty")(options "")(descr ""))
+  (lib (name "Xiao_Esp32")(type "KiCad")(uri "${KIPRJMOD}/Libs/Xiao_Esp32.pretty")(options "")(descr ""))
+)
