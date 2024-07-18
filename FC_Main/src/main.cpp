@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include "SPIFFS.h"
+#include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 
 #define MOTOR_A D0 
@@ -8,8 +9,8 @@
 #define MOTOR_C D2
 #define MOTOR_D D8
 
-const char *ssid = "Test";
-const char *password = "123456789";
+const char *ssid = "RTR_JOY202";
+const char *password = "RTR@2021";
 
 const char* PARAM_INPUT_1 = "valX";
 const char* PARAM_INPUT_2 = "valY";
@@ -18,6 +19,8 @@ const char* PARAM_INPUT_3 = "valW";
 String inputMessage1;
 String inputMessage2;
 String inputMessage3;
+
+int packetCount = 0;
 
 int16_t GyroX = 0, GyroY = 0, GyroZ = 0;
 int16_t AccXLSB = 0, AccYLSB = 0, AccZLSB = 0;
@@ -38,17 +41,17 @@ float Kalman1DOutput[] = {0,0};
 void gyro_signals(void);
 void kalman_1d(float KalmanState, float KalmanUncertainty, float KalmanInput, float KalmanMeasurement);
 
-void notifyClients();
-
 void handleWebSocketMessage(void *arg, uint8_t *data, size_t len);
 void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len);
 void initWebSocket();
-String processor(const String& var);
 
 TaskHandle_t Task1;
 TaskHandle_t Task2;
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
+
+void Task1code(void *pvParameters);
+void Task2code(void *pvParameters);
 
 void setup() {
   pinMode(MOTOR_A, OUTPUT);
@@ -82,6 +85,48 @@ void setup() {
   RateCalibrationYaw /= 2000;
   LoopTimer = micros();
 
+  WiFi.softAP(ssid, password);
+
+  IPAddress IP = WiFi.softAPIP();
+  Serial.print("AP IP address: ");
+  Serial.println(IP);
+
+  // WiFi.begin(ssid, password);
+  // Serial.println("Connecting");
+  // while (WiFi.status() != WL_CONNECTED){
+  //   delay(500);
+  //   Serial.print(".");
+  // }
+
+  // Serial.println("");
+  // Serial.print("Connected to WiFi network with IP Address: ");
+  // Serial.println(WiFi.localIP());
+  ws.onEvent(onEvent);
+  server.addHandler(&ws);
+
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
+            { request->send(SPIFFS, "/joy.html", "text/html"); });
+
+  server.on("/update", HTTP_GET, [] (AsyncWebServerRequest *request) {
+    if (request->hasParam(PARAM_INPUT_1) && request->hasParam(PARAM_INPUT_2) && request->hasParam(PARAM_INPUT_3)) {
+      inputMessage1 = request->getParam(PARAM_INPUT_1)->value();
+      inputMessage2 = request->getParam(PARAM_INPUT_2)->value();
+      inputMessage3 = request->getParam(PARAM_INPUT_3)->value();
+      /*joy_x = */inputMessage1.toInt();
+      /*joy_y = */inputMessage2.toInt();
+      /*joy_w = */inputMessage3.toInt();
+      // last_packet = millis();
+    }
+    else {
+      inputMessage1 = "No message sent";
+      inputMessage2 = "No message sent";
+      inputMessage3 = "No message sent";
+     }
+    request->send(200, "text/plain", "OK");
+  });
+
+  server.begin();
+
 
   //create a task that will be executed in the Task1code() function, with priority 1 and executed on core 0
   xTaskCreatePinnedToCore(
@@ -110,34 +155,6 @@ void setup() {
       return;
   }
 
-  WiFi.softAP(ssid, password);
-
-  IPAddress IP = WiFi.softAPIP();
-  Serial.print("AP IP address: ");
-  Serial.println(IP);
-
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
-            { request->send(SPIFFS, "/joy.html", "text/html"); });
-
-  server.on("/update", HTTP_GET, [] (AsyncWebServerRequest *request) {
-    if (request->hasParam(PARAM_INPUT_1) && request->hasParam(PARAM_INPUT_2) && request->hasParam(PARAM_INPUT_3)) {
-      inputMessage1 = request->getParam(PARAM_INPUT_1)->value();
-      inputMessage2 = request->getParam(PARAM_INPUT_2)->value();
-      inputMessage3 = request->getParam(PARAM_INPUT_3)->value();
-      /*joy_x = */inputMessage1.toInt();
-      /*joy_y = */inputMessage2.toInt();
-      /*joy_w = */inputMessage3.toInt();
-      // last_packet = millis();
-    }
-    else {
-      inputMessage1 = "No message sent";
-      inputMessage2 = "No message sent";
-      inputMessage3 = "No message sent";
-     }
-    request->send(200, "text/plain", "OK");
-  });
-
-  server.begin();
 }
 
 //Task 1
@@ -147,7 +164,7 @@ void Task1code( void * pvParameters ) {
   Serial.println("Task1- Drone Control");
 
   for (;;) {
-
+    ws.cleanupClients();
     vTaskDelay(1);
   }
 }
@@ -172,9 +189,9 @@ void Task2code( void * pvParameters ) {
     KalmanAnglePitch = Kalman1DOutput[0]; 
     KalmanUncertaintyAnglePitch = Kalman1DOutput[1];
     
-    Serial.print("Roll Angle [°] "); Serial.print(KalmanAngleRoll);
-    Serial.print(" Pitch Angle [°] "); Serial.print(KalmanAnglePitch);
-    Serial.print(" Yaw Angle [°] "); Serial.println(gf_yaw);
+    // Serial.print("Roll Angle [°] "); Serial.print(KalmanAngleRoll);
+    // Serial.print(" Pitch Angle [°] "); Serial.print(KalmanAnglePitch);
+    // Serial.print(" Yaw Angle [°] "); Serial.println(gf_yaw);
     
     while (micros() - LoopTimer < 4000);
     LoopTimer=micros();
@@ -280,9 +297,33 @@ uint8_t readByte(uint8_t address, uint8_t subAddress) {
 
 void handleWebSocketMessage(void *arg, uint8_t *data, size_t len) {
   AwsFrameInfo *info = (AwsFrameInfo*)arg;
+
+
+  // data[len] = 0;
+  // char charArray[sizeof(data) + 1];
+  // // std::string payload(reinterpret_cast<char*>(data), sizeof(data));
+  // for (size_t i = 0; i < sizeof(data); i++) {
+  //   charArray[i] = static_cast<char>(data[i]);
+  // }
+  // String temp = String(charArray);
+  // Serial.println(temp);
+  // if (strcmp((char*)data, "toggle") == 0) {
+    // for(int i = 0; i < sizeof(data); i++){
+    //   Serial.print(char(data[i]));
+    // }
+    // Serial.println();
+
   if (info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT) {
     data[len] = 0;
-    if (strcmp((char*)data, "toggle") == 0) {
+    for(int i = 0; i < sizeof(data); i++){
+      Serial.print(char(data[i]));
+      if(packetCount == 0){
+        Serial.print("X: "); Serial.print(char(data[0]));
+        packetCount++;
+      } else {
+        Serial.print("Y: "); Serial.println(char(data[0]));
+        packetCount= 0;
+      }
     }
   }
 }
