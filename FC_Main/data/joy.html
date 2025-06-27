@@ -416,56 +416,29 @@ var JoyStick = (function(container, parameters, callback)
 	</head>
 	<body>
 		<div class="rowC">
+            <div class="button--container">
+                <!-- <input type="range" min="1" max="100" value="50" class="slider" id="myRange" > -->
+                <input id="slider2" type="range" min="1" max="100" value="0" class="slider">
+            </div>  
 			<div class="columnLateral">
 				<div id="joy1Div" style="width:300px;height:300px;margin:50px;"  internalFillColor="#fff"></div>
 				X :<input id="joy1X" type="text" /></br>
 				Y :<input id="joy1Y" type="text" />
             </div>
 
-            <div class="button--container">
-                <input type="range" min="1" max="100" value="50" class="slider" id="myRange" >
-                <input id="slider2" type="range" min="1" max="100" value="69" class="slider">
-            </div>  
-
-			<div class="columnLateral">
+			<!-- <div class="columnLateral">
 				<div id="joy2Div" style="width:300px;height:300px;margin:50px;"  internalFillColor="#fff"></div>
 				X :<input id="joy2X" type="text" /></br>
 				Y :<input id="joy2Y" type="text" />
-            </div>
+            </div> -->
 		</div>
 
-        <button id="button">Toggle</button>
+        <!-- <button id="button">Toggle</button> -->
 
-<script type="text/javascript">
-    // Data send function
-	// setInterval(() => {
-
-    //     const payload = joy1X.value + "|" + joy1Y.value + "|" + val_w;
-    //     websocket.send(payload);
-    //     // console.log("X: ", joy1X.value, " Y: ", joy1Y.value);
-    //     // old_x = joy1X.value;
-    //     // old_y = joy1Y.value;
-    //     // var xhr = new XMLHttpRequest();
-    //     // xhr.open("GET", "/update?valX="+joy1X.value+"&valY="+joy1Y.value+"&valW="+val_w, true);
-    //     // xhr.send();
-
-    //     // if(joy1X.value !== old_x || joy1Y.value !== old_y || val_w !== old_w){
-    //     //     console.log("X: ", joy1X.value, " Y: ", joy1Y.value);
-    //     //     old_x = joy1X.value;
-    //     //     old_y = joy1Y.value;
-    //     //     old_w = val_w;
-    //     //     var xhr = new XMLHttpRequest();
-    //     //     xhr.open("GET", "/update?valX="+joy1X.value+"&valY="+joy1Y.value+"&valW="+val_w, true);
-    //     //     xhr.send();
-    //     // }
-	// }, 15);
-</script>
 
 <script>
 	var joy1X = document.getElementById("joy1X");
 	var joy1Y = document.getElementById("joy1Y");
-    var joy2X = document.getElementById("joy2X");
-	var joy2Y = document.getElementById("joy2Y");
     var val_w = 0;
 
     var slider = document.getElementById("slider2");
@@ -482,16 +455,9 @@ var JoyStick = (function(container, parameters, callback)
     var old_y = 0;
     var old_w = 0;
 
-
-
 	var Joy1 = new JoyStick('joy1Div', {}, function(stickData) {
 		joy1X.value = stickData.x;
 		joy1Y.value = stickData.y;
-	});
-
-    var Joy2 = new JoyStick('joy2Div', {}, function(stickData) {
-		joy2X.value = stickData.x;
-		joy2Y.value = stickData.y;
 	});
 
 
@@ -508,11 +474,22 @@ var JoyStick = (function(container, parameters, callback)
     function onOpen(event) {
       console.log('Connection opened');
       setInterval(() => {
-        const payload = "|" + joy1X.value + "|" + joy1Y.value + "|" + val_w + "|";
+
+        const payload = {
+            X: ~~parseFloat(joy1X.value),
+            Y: ~~parseFloat(joy1Y.value),
+            W: ~~parseFloat(slider.value),
+        };
         console.log(payload);
-        websocket.send(joy1X.value);
-        websocket.send(joy1Y.value);
-      }, 15);
+        if (old_x != joy1X.value || old_y != joy1Y.value || old_w != slider.value) {
+          old_x = joy1X.value;
+          old_y = joy1Y.value;
+          old_w = val_w;
+          websocket.send(JSON.stringify(payload));
+        }
+
+        // websocket.send(joy1Y.value);
+      }, 5);
     }
     function onClose(event) {
       console.log('Connection closed');

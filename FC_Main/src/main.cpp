@@ -1,3 +1,6 @@
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+
 #include <Arduino.h>
 #include <Wire.h>
 #include "SPIFFS.h"
@@ -12,15 +15,17 @@
 const char *ssid = "RTR_JOY202";
 const char *password = "RTR@2021";
 
-const char* PARAM_INPUT_1 = "valX";
-const char* PARAM_INPUT_2 = "valY";
-const char* PARAM_INPUT_3 = "valW";
+struct JoyPayload {
+  float x;
+  float y;
+  float w;
+};
 
-String inputMessage1;
-String inputMessage2;
-String inputMessage3;
-
-int packetCount = 0;
+typedef struct {
+  float roll;
+  float pitch;
+  float yaw;
+} imu_data_t;
 
 int16_t GyroX = 0, GyroY = 0, GyroZ = 0;
 int16_t AccXLSB = 0, AccYLSB = 0, AccZLSB = 0;
@@ -38,12 +43,23 @@ float KalmanAngleRoll = 0, KalmanUncertaintyAngleRoll = 2*2;
 float KalmanAnglePitch = 0, KalmanUncertaintyAnglePitch = 2*2;
 float Kalman1DOutput[] = {0,0};
 
+// PID state
+float err_roll = 0, err_pitch = 0, err_yaw = 0;
+float prev_err_roll = 0, prev_err_pitch = 0, prev_err_yaw = 0;
+float I_roll = 0, I_pitch = 0, I_yaw = 0;
+
+float kp = 4.0f, ki = 0.02f, kd = 10.0f;
+unsigned long prev_time = 0;
+unsigned long elapsed_time = 0;
+
 void gyro_signals(void);
 void kalman_1d(float KalmanState, float KalmanUncertainty, float KalmanInput, float KalmanMeasurement);
+void calculate_pid(imu_data_t data, float setpoint_roll, float setpoint_pitch, float setpoint_yaw);
 
 void handleWebSocketMessage(void *arg, uint8_t *data, size_t len);
 void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len);
 void initWebSocket();
+
 
 TaskHandle_t Task1;
 TaskHandle_t Task2;
@@ -52,6 +68,23 @@ AsyncWebSocket ws("/ws");
 
 void Task1code(void *pvParameters);
 void Task2code(void *pvParameters);
+
+uint8_t left_trigger = 0, right_trigger = 0;
+bool ball_picking_flagA = false, ball_picking_flagB = false;
+unsigned long acctuate_timerA, acctuate_timerB;
+
+int joystickX = 0;
+int joystickY = 0;
+int throttle = 0;
+
+u8_t motor_speed_A = 0;
+u8_t motor_speed_B = 0;
+u8_t motor_speed_C = 0;
+u8_t motor_speed_D = 0;
+
+QueueHandle_t imuQueue;
+imu_data_t  imu_proceesed;
+imu_data_t imu_raw;
 
 void setup() {
   pinMode(MOTOR_A, OUTPUT);
@@ -91,42 +124,19 @@ void setup() {
   Serial.print("AP IP address: ");
   Serial.println(IP);
 
-  // WiFi.begin(ssid, password);
-  // Serial.println("Connecting");
-  // while (WiFi.status() != WL_CONNECTED){
-  //   delay(500);
-  //   Serial.print(".");
-  // }
-
-  // Serial.println("");
-  // Serial.print("Connected to WiFi network with IP Address: ");
-  // Serial.println(WiFi.localIP());
   ws.onEvent(onEvent);
   server.addHandler(&ws);
 
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
             { request->send(SPIFFS, "/joy.html", "text/html"); });
 
-  server.on("/update", HTTP_GET, [] (AsyncWebServerRequest *request) {
-    if (request->hasParam(PARAM_INPUT_1) && request->hasParam(PARAM_INPUT_2) && request->hasParam(PARAM_INPUT_3)) {
-      inputMessage1 = request->getParam(PARAM_INPUT_1)->value();
-      inputMessage2 = request->getParam(PARAM_INPUT_2)->value();
-      inputMessage3 = request->getParam(PARAM_INPUT_3)->value();
-      /*joy_x = */inputMessage1.toInt();
-      /*joy_y = */inputMessage2.toInt();
-      /*joy_w = */inputMessage3.toInt();
-      // last_packet = millis();
-    }
-    else {
-      inputMessage1 = "No message sent";
-      inputMessage2 = "No message sent";
-      inputMessage3 = "No message sent";
-     }
-    request->send(200, "text/plain", "OK");
-  });
-
   server.begin();
 
+  imuQueue = xQueueCreate(10, sizeof(imu_data_t));
+  if (imuQueue == NULL) {
+    Serial.println("Failed to create IMU queue!");
+    while (1); // Halt here to catch error
+  }
 
   //create a task that will be executed in the Task1code() function, with priority 1 and executed on core 0
   xTaskCreatePinnedToCore(
@@ -134,7 +144,7 @@ void setup() {
     "Task1",     /* name of task. */
     4096,        /* Stack size of task */
     NULL,        /* parameter of the task */
-    7,           /* priority of the task */
+    5,           /* priority of the task */
     &Task1,      /* Task handle to keep track of created task */
     0);          /* pin task to core 0 */
   delay(500);
@@ -145,7 +155,7 @@ void setup() {
     "Task2",     /* name of task. */
     2048,        /* Stack size of task */
     NULL,        /* parameter of the task */
-    5,           /* priority of the task */
+    4,           /* priority of the task */
     &Task2,      /* Task handle to keep track of created task */
     1);          /* pin task to core 1 */
   delay(500);
@@ -165,7 +175,17 @@ void Task1code( void * pvParameters ) {
 
   for (;;) {
     ws.cleanupClients();
-    vTaskDelay(1);
+
+    if (!xQueueReceive(imuQueue, &imu_proceesed, pdMS_TO_TICKS(100)) == pdPASS) {
+      Serial.println("No IMU data received in time.");
+    }
+
+    if(millis() - prev_time > 50) {
+      calculate_pid(imu_proceesed, AngleRoll, AnglePitch, gf_yaw);
+    }
+
+    vTaskDelay(2);
+    yield();
   }
 }
 
@@ -189,15 +209,15 @@ void Task2code( void * pvParameters ) {
     KalmanAnglePitch = Kalman1DOutput[0]; 
     KalmanUncertaintyAnglePitch = Kalman1DOutput[1];
     
-    // Serial.print("Roll Angle [°] "); Serial.print(KalmanAngleRoll);
-    // Serial.print(" Pitch Angle [°] "); Serial.print(KalmanAnglePitch);
-    // Serial.print(" Yaw Angle [°] "); Serial.println(gf_yaw);
-    
-    while (micros() - LoopTimer < 4000);
-    LoopTimer=micros();
+    imu_raw.roll = RateRoll;
+    imu_raw.pitch = RatePitch;
+    imu_raw.yaw = gf_yaw;
+
+    xQueueSend(imuQueue, &imu_raw, 0);
+
+    vTaskDelay(pdMS_TO_TICKS(4));
   }
 }
-
 
 void loop() {
   // put your main code here, to run repeatedly:
@@ -295,41 +315,32 @@ uint8_t readByte(uint8_t address, uint8_t subAddress) {
   return data;
 }
 
+
 void handleWebSocketMessage(void *arg, uint8_t *data, size_t len) {
   AwsFrameInfo *info = (AwsFrameInfo*)arg;
 
-
-  // data[len] = 0;
-  // char charArray[sizeof(data) + 1];
-  // // std::string payload(reinterpret_cast<char*>(data), sizeof(data));
-  // for (size_t i = 0; i < sizeof(data); i++) {
-  //   charArray[i] = static_cast<char>(data[i]);
-  // }
-  // String temp = String(charArray);
-  // Serial.println(temp);
-  // if (strcmp((char*)data, "toggle") == 0) {
-    // for(int i = 0; i < sizeof(data); i++){
-    //   Serial.print(char(data[i]));
-    // }
-    // Serial.println();
-
   if (info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT) {
-    data[len] = 0;
-    for(int i = 0; i < sizeof(data); i++){
-      Serial.print(char(data[i]));
-      if(packetCount == 0){
-        Serial.print("X: "); Serial.print(char(data[0]));
-        packetCount++;
-      } else {
-        Serial.print("Y: "); Serial.println(char(data[0]));
-        packetCount= 0;
-      }
+    data[len] = 0; // Null-terminate the input
+    char *ptr = (char*)data;
+
+    char *xPos = strstr(ptr, "\"X\":");
+    char *yPos = strstr(ptr, "\"Y\":");
+    char *wPos = strstr(ptr, "\"W\":");
+
+    if (xPos && yPos && wPos) {
+      joystickX = atoi(xPos + 4);
+      joystickY = atoi(yPos + 4);
+      throttle = atoi(wPos + 4);
+
+      Serial.printf("Joystick X: %d, Y: %d, W: %d\n", joystickX, joystickY, throttle);
+    } else {
+      Serial.println("Invalid JSON format");
     }
   }
 }
 
-void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type,
-             void *arg, uint8_t *data, size_t len) {
+
+void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
   switch (type) {
     case WS_EVT_CONNECT:
       Serial.printf("WebSocket client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
@@ -349,4 +360,77 @@ void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType 
 void initWebSocket() {
   ws.onEvent(onEvent);
   server.addHandler(&ws);
+}
+
+void calculate_pid(imu_data_t data, float setpoint_roll, float setpoint_pitch, float setpoint_yaw) {
+  elapsed_time = (millis() - prev_time);  // convert to seconds
+
+  // === PID on ROLL ===
+  err_roll = setpoint_roll - data.roll;
+  float P_roll = kp * err_roll;
+  I_roll += ki * err_roll * elapsed_time;
+  float D_roll = kd * (err_roll - prev_err_roll) / elapsed_time;
+  float PID_roll = P_roll + I_roll + D_roll;
+
+  // === PID on PITCH ===
+  err_pitch = setpoint_pitch - data.pitch;
+  float P_pitch = kp * err_pitch;
+  I_pitch += ki * err_pitch * elapsed_time;
+  float D_pitch = kd * (err_pitch - prev_err_pitch) / elapsed_time;
+  float PID_pitch = P_pitch + I_pitch + D_pitch;
+
+  // === PID on YAW ===
+  err_yaw = setpoint_yaw - data.yaw;
+  float P_yaw = kp * err_yaw;
+  I_yaw += ki * err_yaw * elapsed_time;
+  float D_yaw = kd * (err_yaw - prev_err_yaw) / elapsed_time;
+  float PID_yaw = P_yaw + I_yaw + D_yaw;
+
+  float motorA = throttle + PID_roll + PID_pitch - PID_yaw;
+  float motorB = throttle - PID_roll + PID_pitch + PID_yaw;
+  float motorC = throttle - PID_roll - PID_pitch - PID_yaw;
+  float motorD = throttle + PID_roll - PID_pitch + PID_yaw;
+
+  if(motorA < 0) motorA = motorA * -1;
+  if(motorB < 0) motorB = motorB * -1;
+  if(motorC < 0) motorC = motorC * -1;
+  if(motorD < 0) motorD = motorD * -1;
+
+  motor_speed_A = (int)motorA;
+  motor_speed_B = (int)motorB;
+  motor_speed_C = (int)motorC;
+  motor_speed_D = (int)motorD;
+
+  // Debugging output
+  // Serial.print("A:");Serial.print(motor_speed_A, 3);Serial.print(" B:");Serial.print(motor_speed_B, 3);
+  // Serial.print(" C:");Serial.print(motor_speed_C, 3);Serial.print(" D:");Serial.print(motor_speed_D, 3);
+  // Serial.print(" Throttle:");Serial.println(throttle);
+  // Serial.print(" Roll:");Serial.print(data.roll);Serial.print(" Pitch:");Serial.print(data.pitch);
+  // Serial.print(" Yaw:");Serial.println(data.yaw);
+
+  motor_speed_A = constrain(motor_speed_A, 0, 255);
+  motor_speed_B = constrain(motor_speed_B, 0, 255);
+  motor_speed_C = constrain(motor_speed_C, 0, 255);
+  motor_speed_D = constrain(motor_speed_D, 0, 255);
+
+  if(throttle < 10) {
+    motor_speed_A = 0;
+    motor_speed_B = 0;
+    motor_speed_C = 0;
+    motor_speed_D = 0;
+  }
+
+  analogWrite(MOTOR_A, motor_speed_A);
+  analogWrite(MOTOR_B, motor_speed_B);
+  analogWrite(MOTOR_C, motor_speed_C);
+  analogWrite(MOTOR_D, motor_speed_D);
+
+  prev_err_roll = err_roll;
+  prev_err_pitch = err_pitch;
+  prev_err_yaw = err_yaw;
+  prev_time = millis();
+}
+
+float map_1(float x, float in_min, float in_max, float out_min, long out_max) {
+  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
