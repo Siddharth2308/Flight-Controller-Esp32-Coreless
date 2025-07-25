@@ -48,7 +48,7 @@ float err_roll = 0, err_pitch = 0, err_yaw = 0;
 float prev_err_roll = 0, prev_err_pitch = 0, prev_err_yaw = 0;
 float I_roll = 0, I_pitch = 0, I_yaw = 0;
 
-float kp = 4.0f, ki = 0.02f, kd = 10.0f;
+float kp = 0.0f, ki = 0.00f, kd = 0.0f;
 unsigned long prev_time = 0;
 unsigned long elapsed_time = 0;
 
@@ -59,7 +59,6 @@ void calculate_pid(imu_data_t data, float setpoint_roll, float setpoint_pitch, f
 void handleWebSocketMessage(void *arg, uint8_t *data, size_t len);
 void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len);
 void initWebSocket();
-
 
 TaskHandle_t Task1;
 TaskHandle_t Task2;
@@ -184,6 +183,9 @@ void Task1code( void * pvParameters ) {
       calculate_pid(imu_proceesed, AngleRoll, AnglePitch, gf_yaw);
     }
 
+    // noInterrupts();
+    // interrupts();
+    
     vTaskDelay(2);
     yield();
   }
@@ -209,9 +211,17 @@ void Task2code( void * pvParameters ) {
     KalmanAnglePitch = Kalman1DOutput[0]; 
     KalmanUncertaintyAnglePitch = Kalman1DOutput[1];
     
-    imu_raw.roll = RateRoll;
-    imu_raw.pitch = RatePitch;
+    imu_raw.roll = KalmanAngleRoll;
+    imu_raw.pitch = KalmanAnglePitch;
     imu_raw.yaw = gf_yaw;
+
+    Serial.print("A:");Serial.print(motor_speed_A);Serial.print(" B:");Serial.print(motor_speed_B);
+    Serial.print(" C:");Serial.print(motor_speed_C);Serial.print(" D:");Serial.print(motor_speed_D);
+    Serial.print(" Throttle:");Serial.print(throttle);
+
+    Serial.print("Roll: "); Serial.print(imu_raw.roll, 4);
+    Serial.print(" Pitch: "); Serial.print(imu_raw.pitch, 4);
+    Serial.print(" Yaw: "); Serial.println(imu_raw.yaw, 4);
 
     xQueueSend(imuQueue, &imu_raw, 0);
 
@@ -332,7 +342,7 @@ void handleWebSocketMessage(void *arg, uint8_t *data, size_t len) {
       joystickY = atoi(yPos + 4);
       throttle = atoi(wPos + 4);
 
-      Serial.printf("Joystick X: %d, Y: %d, W: %d\n", joystickX, joystickY, throttle);
+      // Serial.printf("Joystick X: %d, Y: %d, W: %d\n", joystickX, joystickY, throttle);
     } else {
       Serial.println("Invalid JSON format");
     }
@@ -363,7 +373,7 @@ void initWebSocket() {
 }
 
 void calculate_pid(imu_data_t data, float setpoint_roll, float setpoint_pitch, float setpoint_yaw) {
-  elapsed_time = (millis() - prev_time);  // convert to seconds
+  elapsed_time = (millis() - prev_time);
 
   // === PID on ROLL ===
   err_roll = setpoint_roll - data.roll;
@@ -386,15 +396,15 @@ void calculate_pid(imu_data_t data, float setpoint_roll, float setpoint_pitch, f
   float D_yaw = kd * (err_yaw - prev_err_yaw) / elapsed_time;
   float PID_yaw = P_yaw + I_yaw + D_yaw;
 
-  float motorA = throttle + PID_roll + PID_pitch - PID_yaw;
-  float motorB = throttle - PID_roll + PID_pitch + PID_yaw;
-  float motorC = throttle - PID_roll - PID_pitch - PID_yaw;
-  float motorD = throttle + PID_roll - PID_pitch + PID_yaw;
+  float motorA = throttle + PID_roll + PID_pitch;// - PID_yaw;
+  float motorB = throttle - PID_roll + PID_pitch;// + PID_yaw;
+  float motorC = throttle - PID_roll - PID_pitch;// - PID_yaw;
+  float motorD = throttle + PID_roll - PID_pitch;// + PID_yaw;
 
-  if(motorA < 0) motorA = motorA * -1;
-  if(motorB < 0) motorB = motorB * -1;
-  if(motorC < 0) motorC = motorC * -1;
-  if(motorD < 0) motorD = motorD * -1;
+  // if(motorA < 0) motorA = 0;
+  // if(motorB < 0) motorB = 0;
+  // if(motorC < 0) motorC = 0;
+  // if(motorD < 0) motorD = 0;
 
   motor_speed_A = (int)motorA;
   motor_speed_B = (int)motorB;
